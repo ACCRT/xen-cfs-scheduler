@@ -316,6 +316,8 @@ struct xen_domctl_max_vcpus {
 #define XEN_SCHEDULER_ARINC653 7
 #define XEN_SCHEDULER_RTDS     8
 #define XEN_SCHEDULER_NULL     9
+/* adding scheduler completely fair scheduler define */
+#define XEN_SCHEDULER_CFS       10
 
 struct xen_domctl_sched_credit {
     uint16_t weight;
