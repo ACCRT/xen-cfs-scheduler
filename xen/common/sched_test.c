@@ -145,6 +145,10 @@
 static int __read_mostly sched_credit_tslice_ms = CSCHED_DEFAULT_TSLICE_MS;
 integer_param("sched_credit_tslice_ms", sched_credit_tslice_ms);
 
+struct load_weight {
+	unsigned long weight, inv_weight;
+};
+
 /*
  * Physical CPU
  */
@@ -166,10 +170,7 @@ struct csched_pcpu {
 
     u64 exec_clock;
 	s_time_t min_vruntime;
-};
-
-struct load_weight {
-	unsigned long weight, inv_weight;
+    s_time_t min_vruntime_copy;
 };
 
 /*
@@ -254,6 +255,199 @@ struct csched_private {
     struct timer master_ticker;
 };
 
+#define sched_entity csched_vcpu
+#define cfs_rq csched_pcpu
+
+/**************************************************************
+ * Scheduling class tree data structure manipulation methods:
+ */
+
+static inline u64 max_vruntime(u64 max_vruntime, u64 vruntime)
+{
+	s64 delta = (s64)(vruntime - max_vruntime);
+	if (delta > 0)
+		max_vruntime = vruntime;
+
+	return max_vruntime;
+}
+
+static inline u64 min_vruntime(u64 min_vruntime, u64 vruntime)
+{
+	s64 delta = (s64)(vruntime - min_vruntime);
+	if (delta < 0)
+		min_vruntime = vruntime;
+
+	return min_vruntime;
+}
+
+static inline int entity_before(struct sched_entity *a,
+				struct sched_entity *b)
+{
+	return (s64)(a->vruntime - b->vruntime) < 0;
+}
+
+static void update_min_vruntime(struct cfs_rq *cfs_rq)
+{
+	struct sched_entity *curr = cfs_rq->curr;
+	struct rb_node *leftmost = (cfs_rq->rb_leftmost);
+
+	u64 vruntime = cfs_rq->min_vruntime;
+
+	if (curr) {
+		if (curr->on_rq)
+			vruntime = curr->vruntime;
+		else
+			curr = NULL;
+	}
+
+	if (leftmost) { /* non-empty tree */
+		struct sched_entity *se;
+		se = rb_entry(leftmost, struct sched_entity, run_node);
+
+		if (!curr)
+			vruntime = se->vruntime;
+		else
+			vruntime = min_vruntime(vruntime, se->vruntime);
+	}
+
+	/* ensure we never gain time by being placed backwards. */
+	cfs_rq->min_vruntime = max_vruntime(cfs_rq->min_vruntime, vruntime);
+#ifndef CONFIG_64BIT
+	smp_wmb();
+	cfs_rq->min_vruntime_copy = cfs_rq->min_vruntime;
+#endif
+}
+
+/*
+ * Enqueue an entity into the rb-tree:
+ */
+static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
+{
+	struct rb_node **link = &cfs_rq->runq_root.rb_node;
+	struct rb_node *parent = NULL;
+	struct sched_entity *entry;
+	bool leftmost = true;
+
+	/*
+	 * Find the right place in the rbtree:
+	 */
+	while (*link) {
+		parent = *link;
+		entry = rb_entry(parent, struct sched_entity, run_node);
+		/*
+		 * We dont care about collisions. Nodes with
+		 * the same key stay together.
+		 */
+		if (entity_before(se, entry)) {
+			link = &parent->rb_left;
+		} else {
+			link = &parent->rb_right;
+			leftmost = false;
+		}
+	}
+
+    // Using a type in v4.13, decrpyted into rb_insert_color_cached in v4.14
+    // Should change if having time
+    /*
+	 * Maintain a cache of leftmost tree entries (it is frequently
+	 * used):
+	 */
+    if (leftmost)
+		cfs_rq->rb_leftmost = &se->run_node;
+
+	rb_link_node(&se->run_node, parent, link);
+	rb_insert_color(&se->run_node,
+			       &cfs_rq->runq_root);
+}
+
+static void __dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
+{
+    // Using a type in v4.13, decrpyted into rb_insert_color_cached in v4.14s
+	// Should change if having time
+    if (cfs_rq->rb_leftmost == &se->run_node) {
+		struct rb_node *next_node;
+
+		next_node = rb_next(&se->run_node);
+		cfs_rq->rb_leftmost = next_node;
+	}
+
+	rb_erase(&se->run_node, &cfs_rq->runq_root);
+}
+
+struct sched_entity *__pick_first_entity(struct cfs_rq *cfs_rq)
+{
+    struct rb_node *left = cfs_rq->rb_leftmost;
+	//struct rb_node *left = rb_first_cached(&cfs_rq->tasks_timeline);
+
+	if (!left)
+		return NULL;
+
+	return rb_entry(left, struct sched_entity, run_node);
+}
+
+static struct sched_entity *__pick_next_entity(struct sched_entity *se)
+{
+	struct rb_node *next = rb_next(&se->run_node);
+
+	if (!next)
+		return NULL;
+
+	return rb_entry(next, struct sched_entity, run_node);
+}
+
+#define CONFIG_SCHED_DEBUG
+
+#ifdef CONFIG_SCHED_DEBUG
+struct sched_entity *__pick_last_entity(struct cfs_rq *cfs_rq)
+{
+	struct rb_node *last = rb_last(&cfs_rq->runq_root);
+
+	if (!last)
+		return NULL;
+
+	return rb_entry(last, struct sched_entity, run_node);
+}
+
+#endif
+
+#ifdef CONFIG_SMP
+#else /* !CONFIG_SMP */
+void init_entity_runnable_average(struct sched_entity *se)
+{
+}
+void post_init_entity_util_avg(struct sched_entity *se)
+{
+}
+static void update_tg_load_avg(struct cfs_rq *cfs_rq, int force)
+{
+}
+
+#endif /* CONFIG_SMP */
+
+#ifdef CONFIG_NUMA_BALANCING
+#else
+static void task_tick_numa(struct rq *rq, struct task_struct *curr)
+{
+}
+
+static inline void account_numa_enqueue(struct rq *rq, struct task_struct *p)
+{
+}
+
+static inline void account_numa_dequeue(struct rq *rq, struct task_struct *p)
+{
+}
+
+#endif /* CONFIG_NUMA_BALANCING */
+
+static void test(void){
+    update_min_vruntime((struct csched_pcpu*)NULL);
+    __enqueue_entity(NULL, NULL);
+    __dequeue_entity(NULL, NULL);
+    __pick_next_entity(NULL);
+    update_tg_load_avg(NULL, 0);
+}
+
 static void csched_tick(void *_cpu);
 static void csched_acct(void *dummy);
 
@@ -303,68 +497,6 @@ entity_key(struct csched_pcpu *spc, struct csched_vcpu *svc)
 	return svc->vruntime - spc->min_vruntime;
 }
 
-static void
-update_min_vruntime(struct csched_pcpu *spc)
-{
-	u64 vruntime = spc->min_vruntime;
-
-	if (spc->curr)
-		vruntime = spc->curr->vruntime;
-
-	if (spc->rb_leftmost) {
-		struct csched_vcpu *se = rb_entry(spc->rb_leftmost,
-						   struct csched_vcpu,
-						   run_node);
-
-		if (!spc->curr)
-			vruntime = se->vruntime;
-		else
-			vruntime = min_vruntime(vruntime, se->vruntime);
-	}
-
-	spc->min_vruntime = max_vruntime(spc->min_vruntime, vruntime);
-}
-
-static inline void 
-__runq_insert(struct csched_vcpu *svc)
-{
-    unsigned int cpu = svc->vcpu->processor;
-    struct csched_pcpu *spc = CSCHED_PCPU(cpu);
-	struct rb_node **link = RBROOT(cpu)->tasks_timeline.rb_node;
-	struct rb_node *parent = NULL;
-	struct csched_vcpu *entry;
-	s64 key = entity_key(spc, svc);
-	int leftmost = 1;
-
-	/*
-	 * Find the right place in the rbtree:
-	 */
-	while (*link) {
-		parent = *link;
-		entry = rb_entry(parent, struct csched_vcpu, run_node);
-		/*
-		 * We dont care about collisions. Nodes with
-		 * the same key stay together.
-		 */
-		if (key < entity_key(spc, entry)) {
-			link = &parent->rb_left;
-		} else {
-			link = &parent->rb_right;
-			leftmost = 0;
-		}
-	}
-
-	/*
-	 * Maintain a cache of leftmost tree entries (it is frequently
-	 * used):
-	 */
-	if (leftmost)
-		spc->rb_leftmost = &svc->run_node;
-
-	rb_link_node(&svc->run_node, parent, link);
-	rb_insert_color(&svc->run_node, &spc->runq_root);
-}
-
 static inline void
 __runq_insert(struct csched_vcpu *svc)
 {
@@ -403,20 +535,6 @@ runq_insert(struct csched_vcpu *svc)
     inc_nr_runnable(svc->vcpu->processor);
 }
 
-static inline void 
-__runq_remove(struct csched_vcpu *svc)
-{
-    struct csched_pcpu * spc = CSCHED_PCPU(svc->vcpu->processor);
-	if (spc->rb_leftmost == &svc->run_node) {
-		struct rb_node *next_node;
-
-		next_node = rb_next(&svc->run_node);
-		spc->rb_leftmost = next_node;
-	}
-
-	rb_erase(&svc->run_node, &spc->runq_root);
-}
-
 static inline void
 __runq_remove(struct csched_vcpu *svc)
 {
@@ -449,14 +567,6 @@ static void burn_credits(struct csched_vcpu *svc, s_time_t now)
     ASSERT(credits == val); /* make sure we haven't truncated val */
     atomic_sub(credits, &svc->credit);
     svc->start_time += (credits * MILLISECS(1)) / CSCHED_CREDITS_PER_MSEC;
-}
-
-static void add_vruntime(struct csched_vcpu *svc, s_time_t runtime)
-{
-    /* Assert svc is current */
-    ASSERT( svc == CSCHED_VCPU(curr_on_cpu(svc->vcpu->processor)) );
-    
-    svc->vruntime = svc->vruntime + runtime;
 }
 
 static bool_t __read_mostly opt_tickle_one_idle = 1;
@@ -698,6 +808,8 @@ init_pdata(struct csched_private *prv, struct csched_pcpu *spc, int cpu)
     ASSERT(spin_is_locked(&prv->lock));
     /* cpu data needs to be allocated, but STILL uninitialized. */
     ASSERT(spc && spc->runq.next == NULL && spc->runq.prev == NULL);
+
+    test();
 
     /* Initialize/update system-wide config */
     prv->credit += prv->credits_per_tslice;
@@ -1941,17 +2053,6 @@ csched_load_balance(struct csched_private *prv, int cpu,
     return snext;
 }
 
-static struct csched_vcpu 
-*__pick_next_entity(struct csched_pcpu *cps)
-{
-	struct rb_node *left = cps->rb_leftmost;
-
-	if (!left)
-		return NULL;
-
-	return rb_entry(left, struct csched_vcpu, run_node);
-}
-
 /*
  * This function is in the critical path. It is designed to be simple and
  * fast for the common case.
@@ -2073,8 +2174,8 @@ csched_schedule(
         dec_nr_runnable(cpu);
     }
 
-    //snext = __runq_elem(runq->next);
-    snext = __pick_next_entity(CSCHED_PCPU(cpu));
+    snext = __runq_elem(runq->next);
+    //snext = __pick_next_entity(CSCHED_PCPU(cpu));
     ret.migrated = 0;
 
     /* Tasklet work (which runs in idle VCPU context) overrides all else. */
@@ -2392,7 +2493,7 @@ static void csched_tick_resume(const struct scheduler *ops, unsigned int cpu)
 static const struct scheduler sched_credit_def = {
     .name           = "SMP CFS Scheduler",
     .opt_name       = "cfs",
-    .sched_id       = XEN_SCHEDULER_CFS,
+    .sched_id       = XEN_SCHEDULER_CREDIT,
     .sched_data     = NULL,
 
     .insert_vcpu    = csched_vcpu_insert,

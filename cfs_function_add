@@ -1,0 +1,23 @@
+
+// Helper function to compare the vruntime
+static inline u64 max_vruntime(u64 max_vruntime, u64 vruntime)
+static inline u64 min_vruntime(u64 max_vruntime, u64 vruntime)
+
+// Helper function to compare two vcpu vruntime
+static inline int entity_before(struct sched_entity *a,
+				struct sched_entity *b)
+
+// Helper function to update the vruntime
+static void update_min_vruntime(struct csched_pcpu *cfs_rq)
+
+// Used to enqueue & dequeue an vcpu into pcpu
+// left most cache combined into rb_insert_color_cached & rb_erase_cached in v14.4
+static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
+static void __dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
+
+struct sched_entity *__pick_first_entity(struct cfs_rq *cfs_rq)
+static struct sched_entity *__pick_next_entity(struct sched_entity *se)
+struct sched_entity *__pick_last_entity(struct cfs_rq *cfs_rq)
+
+//ignore things about NUMA and SMP first about multicpu
+
