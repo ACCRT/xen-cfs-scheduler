@@ -487,6 +487,9 @@ find_matching_se(struct sched_entity **se, struct sched_entity **pse)
 
 #endif	/* CONFIG_FAIR_GROUP_SCHED */
 
+static inline
+void account_cfs_rq_runtime(struct cfs_rq *cfs_rq, u64 delta_exec);
+
 /**************************************************************
  * Scheduling class tree data structure manipulation methods:
  */
@@ -676,13 +679,16 @@ static u64 sched_slice(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
 	u64 slice = __sched_period(cfs_rq->nr_running + !se->on_rq);
 
+    // the only vcpu, since vcpu do not have parenet or child
 	for_each_sched_entity(se) {
 		struct load_weight *load;
 		struct load_weight lw;
 
+        // get the load of pcpu
 		cfs_rq = cfs_rq_of(se);
 		load = &cfs_rq->load;
 
+        // add vcpu load to pcpu if vcpu is not in pcpu
 		if (unlikely(!se->on_rq)) {
 			lw = cfs_rq->load;
 
@@ -691,6 +697,7 @@ static u64 sched_slice(struct cfs_rq *cfs_rq, struct sched_entity *se)
 			update_load_add(&lw, se->load.weight);
 			load = &lw;
 		}
+        // calculate the slice due to load of vcpu in pcpu
 		slice = __calc_delta(slice, se->load.weight, load);
 	}
 	return slice;
@@ -714,6 +721,69 @@ static void update_tg_load_avg(struct cfs_rq *cfs_rq, int force)
 }
 
 #endif /* CONFIG_SMP */
+
+/*
+ * Update the current task's runtime statistics.
+ */
+static void update_curr(struct cfs_rq *cfs_rq)
+{
+	struct sched_entity *curr = cfs_rq->curr;
+	//u64 now = rq_clock_task(rq_of(cfs_rq));
+	u64 now = NOW();
+    u64 delta_exec;
+
+	if (unlikely(!curr))
+		return;
+
+	delta_exec = now - curr->exec_start;
+	if (unlikely((s64)delta_exec <= 0))
+		return;
+
+	curr->exec_start = now;
+
+	//schedstat_set(curr->statistics.exec_max,
+	//	      max(delta_exec, curr->statistics.exec_max));
+
+	curr->sum_exec_runtime += delta_exec;
+	//schedstat_add(cfs_rq->exec_clock, delta_exec);
+
+	curr->vruntime += calc_delta_fair(delta_exec, curr);
+	update_min_vruntime(cfs_rq);
+
+    // if(likely(entity_is_task(curr))){
+	// if (entity_is_task(curr)) {
+	// 	struct task_struct *curtask = task_of(curr);
+
+	// 	trace_sched_stat_runtime(curtask, delta_exec, curr->vruntime);
+	// 	cgroup_account_cputime(curtask, delta_exec);
+	// 	account_group_exec_runtime(curtask, delta_exec);
+	// }
+
+	account_cfs_rq_runtime(cfs_rq, delta_exec);
+}
+
+static void update_curr_fair(struct rq *rq)
+{
+	//update_curr(cfs_rq_of(&rq->curr->se));
+    update_curr(cfs_rq_of(rq->curr));
+}
+
+/*
+ * We are picking a new current task - update its stats:
+ */
+static inline void
+update_stats_curr_start(struct cfs_rq *cfs_rq, struct sched_entity *se)
+{
+	/*
+	 * We are starting a new run period:
+	 */
+	//se->exec_start = rq_clock_task(rq_of(cfs_rq));
+    se->exec_start = NOW();
+}
+
+/**************************************************
+ * Scheduling class queueing methods:
+ */
 
 #ifdef CONFIG_NUMA_BALANCING
 #else
@@ -802,28 +872,30 @@ static inline void update_cfs_group(struct sched_entity *se)
 // #endif
 // }
 
-// #ifdef CONFIG_CFS_BANDWIDTH
-// #else /* CONFIG_CFS_BANDWIDTH */
-// static inline u64 cfs_rq_clock_task(struct cfs_rq *cfs_rq)
-// {
-// 	return rq_clock_task(rq_of(cfs_rq));
-// }
+#ifdef CONFIG_CFS_BANDWIDTH
+#else /* CONFIG_CFS_BANDWIDTH */
+static inline u64 cfs_rq_clock_task(struct cfs_rq *cfs_rq)
+{
+    return NOW();
+	//return rq_clock_task(rq_of(cfs_rq));
+}
 
-// static void account_cfs_rq_runtime(struct cfs_rq *cfs_rq, u64 delta_exec) {}
-// static bool check_cfs_rq_runtime(struct cfs_rq *cfs_rq) { return false; }
-// static void check_enqueue_throttle(struct cfs_rq *cfs_rq) {}
+static void account_cfs_rq_runtime(struct cfs_rq *cfs_rq, u64 delta_exec) {}
+static bool check_cfs_rq_runtime(struct cfs_rq *cfs_rq) { return false; }
+static void check_enqueue_throttle(struct cfs_rq *cfs_rq) {}
+
 // static inline void sync_throttle(struct task_group *tg, int cpu) {}
-// static __always_inline void return_cfs_rq_runtime(struct cfs_rq *cfs_rq) {}
+static inline void return_cfs_rq_runtime(struct cfs_rq *cfs_rq) {}
 
-// static inline int cfs_rq_throttled(struct cfs_rq *cfs_rq)
-// {
-// 	return 0;
-// }
+static inline int cfs_rq_throttled(struct cfs_rq *cfs_rq)
+{
+	return 0;
+}
 
-// static inline int throttled_hierarchy(struct cfs_rq *cfs_rq)
-// {
-// 	return 0;
-// }
+static inline int throttled_hierarchy(struct cfs_rq *cfs_rq)
+{
+	return 0;
+}
 
 // static inline int throttled_lb_pair(struct task_group *tg,
 // 				    int src_cpu, int dest_cpu)
@@ -833,19 +905,19 @@ static inline void update_cfs_group(struct sched_entity *se)
 
 // void init_cfs_bandwidth(struct cfs_bandwidth *cfs_b) {}
 
-// #ifdef CONFIG_FAIR_GROUP_SCHED
-// static void init_cfs_rq_runtime(struct cfs_rq *cfs_rq) {}
-// #endif
+#ifdef CONFIG_FAIR_GROUP_SCHED
+static void init_cfs_rq_runtime(struct cfs_rq *cfs_rq) {}
+#endif
 
 // static inline struct cfs_bandwidth *tg_cfs_bandwidth(struct task_group *tg)
 // {
 // 	return NULL;
 // }
 // static inline void destroy_cfs_bandwidth(struct cfs_bandwidth *cfs_b) {}
-// static inline void update_runtime_enabled(struct rq *rq) {}
-// static inline void unthrottle_offline_cfs_rqs(struct rq *rq) {}
+static inline void update_runtime_enabled(struct rq *rq) {}
+static inline void unthrottle_offline_cfs_rqs(struct rq *rq) {}
 
-// #endif /* CONFIG_CFS_BANDWIDTH */
+#endif /* CONFIG_CFS_BANDWIDTH */
 
 // #ifdef CONFIG_SCHED_HRTICK
 // #else /* !CONFIG_SCHED_HRTICK */
@@ -871,6 +943,11 @@ static void test(void){
     task_tick_numa(NULL, NULL);
     __sched_period(0);
     sched_vslice(NULL, NULL);
+    update_curr(NULL);
+    update_curr_fair(NULL);
+    
+    check_cfs_rq_runtime(NULL);
+    check_enqueue_throttle(NULL);
 }
 
 static void csched_tick(void *_cpu);
