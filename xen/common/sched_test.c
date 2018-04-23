@@ -683,7 +683,7 @@ static struct sched_entity *__pick_next_entity(struct sched_entity *se)
 	return rb_entry(next, struct sched_entity, run_node);
 }
 
-#define CONFIG_SCHED_DEBUG
+//#define CONFIG_SCHED_DEBUG
 
 #ifdef CONFIG_SCHED_DEBUG
 struct sched_entity *__pick_last_entity(struct cfs_rq *cfs_rq)
@@ -955,44 +955,112 @@ static inline void update_cfs_group(struct sched_entity *se)
 }
 #endif /* CONFIG_FAIR_GROUP_SCHED */
 
-// #ifdef CONFIG_SMP
-// #else /* CONFIG_SMP */
+#ifdef CONFIG_SMP
+#else /* CONFIG_SMP */
 
-// static inline int
-// update_cfs_rq_load_avg(u64 now, struct cfs_rq *cfs_rq)
-// {
-// 	return 0;
-// }
+static inline int
+update_cfs_rq_load_avg(u64 now, struct cfs_rq *cfs_rq)
+{
+	return 0;
+}
 
-// #define UPDATE_TG	0x0
-// #define SKIP_AGE_LOAD	0x0
-// #define DO_ATTACH	0x0
+#define UPDATE_TG	0x0
+#define SKIP_AGE_LOAD	0x0
+#define DO_ATTACH	0x0
 
-// static inline void update_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *se, int not_used1)
-// {
-// 	cfs_rq_util_change(cfs_rq, 0);
-// }
+static inline void update_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *se, int not_used1)
+{
+	//cfs_rq_util_change(cfs_rq, 0);
+}
 
-// static inline void remove_entity_load_avg(struct sched_entity *se) {}
+static inline void remove_entity_load_avg(struct sched_entity *se) {}
 
-// static inline void
-// attach_entity_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags) {}
-// static inline void
-// detach_entity_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *se) {}
+static inline void
+attach_entity_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags) {}
+static inline void
+detach_entity_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *se) {}
 
-// static inline int idle_balance(struct rq *rq, struct rq_flags *rf)
-// {
-// 	return 0;
-// }
+//static inline int idle_balance(struct rq *rq, struct rq_flags *rf)
+//{
+//	return 0;
+//}
 
-// static inline void
-// util_est_enqueue(struct cfs_rq *cfs_rq, struct task_struct *p) {}
+static inline void
+util_est_enqueue(struct cfs_rq *cfs_rq, struct task_struct *p) {}
 
-// static inline void
-// util_est_dequeue(struct cfs_rq *cfs_rq, struct task_struct *p,
-// 		 bool task_sleep) {}
+static inline void
+util_est_dequeue(struct cfs_rq *cfs_rq, struct task_struct *p,
+		 bool task_sleep) {}
 
-// #endif /* CONFIG_SMP */
+#endif /* CONFIG_SMP */
+
+static void check_spread(struct cfs_rq *cfs_rq, struct sched_entity *se)
+{
+#ifdef CONFIG_SCHED_DEBUG
+	s64 d = se->vruntime - cfs_rq->min_vruntime;
+
+	if (d < 0)
+		d = -d;
+
+	if (d > 3*sysctl_sched_latency)
+		schedstat_inc(cfs_rq->nr_spread_over);
+#endif
+}
+
+static void
+place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int initial)
+{
+	u64 vruntime = cfs_rq->min_vruntime;
+
+	/*
+	 * The 'current' period is already promised to the current tasks,
+	 * however the extra weight of the new task will slow them down a
+	 * little, place the new task so that it fits in the slot that
+	 * stays open at the end.
+	 */
+	//if (initial && sched_feat(START_DEBIT))
+	if (initial)
+		vruntime += sched_vslice(cfs_rq, se);
+
+	/* sleeps up to a single latency don't count. */
+	if (!initial) {
+		unsigned long thresh = sysctl_sched_latency;
+
+		/*
+		 * Halve their sleep time's effect, to allow
+		 * for a gentler effect of sleepers:
+		 */
+		//if (sched_feat(GENTLE_FAIR_SLEEPERS))
+			thresh >>= 1;
+
+		vruntime -= thresh;
+	}
+
+	/* ensure we never gain time by being placed backwards. */
+	se->vruntime = max_vruntime(se->vruntime, vruntime);
+}
+
+static void check_enqueue_throttle(struct cfs_rq *cfs_rq);
+
+static inline void check_schedstat_required(void)
+{
+#ifdef CONFIG_SCHEDSTATS
+	if (schedstat_enabled())
+		return;
+
+	/* Force schedstat enabled if a dependent tracepoint is active */
+	if (trace_sched_stat_wait_enabled()    ||
+			trace_sched_stat_sleep_enabled()   ||
+			trace_sched_stat_iowait_enabled()  ||
+			trace_sched_stat_blocked_enabled() ||
+			trace_sched_stat_runtime_enabled())  {
+		printk_deferred_once("Scheduler tracepoints stat_sleep, stat_iowait, "
+			     "stat_blocked and stat_runtime require the "
+			     "kernel parameter schedstats=enable or "
+			     "kernel.sched_schedstats=1\n");
+	}
+#endif
+}
 
 // static void check_spread(struct cfs_rq *cfs_rq, struct sched_entity *se)
 // {
@@ -1069,22 +1137,17 @@ static inline void unthrottle_offline_cfs_rqs(struct rq *rq) {}
 
 
 static void test(void){
-    __calc_delta(0,0,NULL);
-    update_min_vruntime((struct csched_pcpu*)NULL);
     __enqueue_entity(NULL, NULL);
     __dequeue_entity(NULL, NULL);
     __pick_next_entity(NULL);
     update_tg_load_avg(NULL, 0);
     task_tick_numa(NULL, NULL);
     __sched_period(0);
-    sched_vslice(NULL, NULL);
-    update_curr(NULL);
     update_curr_fair(NULL);
-    account_entity_enqueue(NULL, NULL);
-    account_entity_dequeue(NULL, NULL);
-    reweight_entity(NULL,NULL,0,0);
     check_cfs_rq_runtime(NULL);
     check_enqueue_throttle(NULL);
+    check_spread(NULL,NULL);
+    place_entity(NULL,NULL,0);
 }
 
 static void csched_tick(void *_cpu);
