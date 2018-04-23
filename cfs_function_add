@@ -22,3 +22,5 @@ struct sched_entity *__pick_last_entity(struct cfs_rq *cfs_rq)
 //ignore things about NUMA and SMP first about multicpu
 
 // 不考虑调度组， se对应vcpu，我们不考虑在虚拟机里开虚拟机的情况
+
+// NO FORK & NO PRIORITY CHANGE
