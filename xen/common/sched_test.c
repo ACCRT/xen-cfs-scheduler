@@ -159,6 +159,8 @@ struct csched_pcpu {
     unsigned int idle_bias;
     unsigned int nr_runnable;
 
+    unsigned int nr_running;
+
     unsigned int tick;
     struct timer ticker;
 
@@ -166,7 +168,7 @@ struct csched_pcpu {
 	struct rb_node *rb_leftmost;
 	
 	struct csched_vcpu *curr, *next, *last;
-    struct load_weight load;
+    struct load_weight load;        /* load of all vcpu on it */
 
     u64 exec_clock;
 	s_time_t min_vruntime;
@@ -255,8 +257,235 @@ struct csched_private {
     struct timer master_ticker;
 };
 
+// treating sched_entity same as task_struct
+// since vcpu is the smallest unit and cannot fork
+// 
+// treating cfs_rq same as rq
+// 
+// donot consider domain, since vcpu is sched directly by pcpu
 #define sched_entity csched_vcpu
 #define cfs_rq csched_pcpu
+
+#define rq csched_pcpu
+#define task_struct csched_vcpu
+
+/*
+ * Integer metrics need fixed point arithmetic, e.g., sched/fair
+ * has a few: load, load_avg, util_avg, freq, and capacity.
+ *
+ * We define a basic fixed point arithmetic range, and then formalize
+ * all these metrics based on that basic range.
+ */
+# define SCHED_FIXEDPOINT_SHIFT		10
+
+/*
+ * Increase resolution of nice-level calculations for 64-bit architectures.
+ * The extra resolution improves shares distribution and load balancing of
+ * low-weight task groups (eg. nice +19 on an autogroup), deeper taskgroup
+ * hierarchies, especially on larger systems. This is not a user-visible change
+ * and does not change the user-interface for setting shares/weights.
+ *
+ * We increase resolution only if we have enough bits to allow this increased
+ * resolution (i.e. 64bit). The costs for increasing resolution when 32bit are
+ * pretty high and the returns do not justify the increased costs.
+ *
+ * Really only required when CONFIG_FAIR_GROUP_SCHED is also set, but to
+ * increase coverage and consistency always enable it on 64bit platforms.
+ */
+#ifdef CONFIG_64BIT
+# define NICE_0_LOAD_SHIFT	(SCHED_FIXEDPOINT_SHIFT + SCHED_FIXEDPOINT_SHIFT)
+# define scale_load(w)		((w) << SCHED_FIXEDPOINT_SHIFT)
+# define scale_load_down(w)	((w) >> SCHED_FIXEDPOINT_SHIFT)
+#else
+# define NICE_0_LOAD_SHIFT	(SCHED_FIXEDPOINT_SHIFT)
+# define scale_load(w)		(w)
+# define scale_load_down(w)	(w)
+#endif
+
+/*
+ * Task weight (visible to users) and its load (invisible to users) have
+ * independent resolution, but they should be well calibrated. We use
+ * scale_load() and scale_load_down(w) to convert between them. The
+ * following must be true:
+ *
+ *  scale_load(sched_prio_to_weight[USER_PRIO(NICE_TO_PRIO(0))]) == NICE_0_LOAD
+ *
+ */
+#define NICE_0_LOAD		(1L << NICE_0_LOAD_SHIFT)
+
+/*
+ * Many a GCC version messes this up and generates a 64x64 mult :-(
+ */
+static inline u64 mul_u32_u32(u32 a, u32 b)
+{
+	return (u64)a * b;
+}
+
+static inline u64 mul_u64_u32_shr(u64 a, u32 mul, unsigned int shift)
+{
+	u32 ah, al;
+	u64 ret;
+
+	al = a;
+	ah = a >> 32;
+
+	ret = mul_u32_u32(al, mul) >> shift;
+	if (ah)
+		ret += mul_u32_u32(ah, mul) << (32 - shift);
+
+	return ret;
+}
+
+/*
+ * Targeted preemption latency for CPU-bound tasks:
+ *
+ * NOTE: this latency value is not the same as the concept of
+ * 'timeslice length' - timeslices in CFS are of variable length
+ * and have no persistent notion like in traditional, time-slice
+ * based scheduling concepts.
+ *
+ * (to see the precise effective timeslice length of your workload,
+ *  run vmstat and monitor the context-switches (cs) field)
+ *
+ * (default: 6ms * (1 + ilog(ncpus)), units: nanoseconds)
+ */
+unsigned int sysctl_sched_latency			= 6000000ULL;
+unsigned int normalized_sysctl_sched_latency		= 6000000ULL;
+
+/*
+ * Minimal preemption granularity for CPU-bound tasks:
+ *
+ * (default: 0.75 msec * (1 + ilog(ncpus)), units: nanoseconds)
+ */
+unsigned int sysctl_sched_min_granularity		= 750000ULL;
+unsigned int normalized_sysctl_sched_min_granularity	= 750000ULL;
+
+/*
+ * This value is kept at sysctl_sched_latency/sysctl_sched_min_granularity
+ */
+static unsigned int sched_nr_latency = 8;
+
+static inline void update_load_add(struct load_weight *lw, unsigned long inc)
+{
+	lw->weight += inc;
+	lw->inv_weight = 0;
+}
+
+#define WMULT_CONST	(~0U)
+#define WMULT_SHIFT	32
+
+static void __update_inv_weight(struct load_weight *lw)
+{
+	unsigned long w;
+
+	if (likely(lw->inv_weight))
+		return;
+
+	w = scale_load_down(lw->weight);
+
+	if (BITS_PER_LONG > 32 && unlikely(w >= WMULT_CONST))
+		lw->inv_weight = 1;
+	else if (unlikely(!w))
+		lw->inv_weight = WMULT_CONST;
+	else
+		lw->inv_weight = WMULT_CONST / w;
+}
+
+/*
+ * delta_exec * weight / lw.weight
+ *   OR
+ * (delta_exec * (weight * lw->inv_weight)) >> WMULT_SHIFT
+ *
+ * Either weight := NICE_0_LOAD and lw \e sched_prio_to_wmult[], in which case
+ * we're guaranteed shift stays positive because inv_weight is guaranteed to
+ * fit 32 bits, and NICE_0_LOAD gives another 10 bits; therefore shift >= 22.
+ *
+ * Or, weight =< lw.weight (because lw.weight is the runqueue weight), thus
+ * weight/lw.weight <= 1, and therefore our shift will also be positive.
+ */
+static u64 __calc_delta(u64 delta_exec, unsigned long weight, struct load_weight *lw)
+{
+	u64 fact = scale_load_down(weight);
+	int shift = WMULT_SHIFT;
+
+	__update_inv_weight(lw);
+
+	if (unlikely(fact >> 32)) {
+		while (fact >> 32) {
+			fact >>= 1;
+			shift--;
+		}
+	}
+
+	/* hint to use a 32x32->64 mul */
+	fact = (u64)(u32)fact * lw->inv_weight;
+
+	while (fact >> 32) {
+		fact >>= 1;
+		shift--;
+	}
+
+	return mul_u64_u32_shr(delta_exec, fact, shift);
+}
+
+#ifdef CONFIG_FAIR_GROUP_SCHED
+#else	/* !CONFIG_FAIR_GROUP_SCHED */
+
+static inline struct task_struct *task_of(struct sched_entity *se)
+{
+	return se;
+}
+
+static inline struct rq *rq_of(struct cfs_rq *cfs_rq)
+{
+	return cfs_rq;
+}
+
+#define entity_is_task(se)	1
+
+#define for_each_sched_entity(se) \
+		for (; se; se = NULL)
+
+static inline struct cfs_rq *task_cfs_rq(struct task_struct *p)
+{
+    // changed, since vcpu contains the processor id
+    // it will be easy to get he pcpu on the vcpu
+    return CSCHED_PCPU(p->vcpu->processor);
+}
+
+static inline struct cfs_rq *cfs_rq_of(struct sched_entity *se)
+{
+    return task_cfs_rq(se);
+}
+
+/* runqueue "owned" by this group */
+static inline struct cfs_rq *group_cfs_rq(struct sched_entity *grp)
+{
+	return NULL;
+}
+
+static inline void list_add_leaf_cfs_rq(struct cfs_rq *cfs_rq)
+{
+}
+
+static inline void list_del_leaf_cfs_rq(struct cfs_rq *cfs_rq)
+{
+}
+
+#define for_each_leaf_cfs_rq_safe(rq, cfs_rq, pos)	\
+		for (cfs_rq = &rq->cfs, pos = NULL; cfs_rq; cfs_rq = pos)
+
+static inline struct sched_entity *parent_entity(struct sched_entity *se)
+{
+	return NULL;
+}
+
+static inline void
+find_matching_se(struct sched_entity **se, struct sched_entity **pse)
+{
+}
+
+#endif	/* CONFIG_FAIR_GROUP_SCHED */
 
 /**************************************************************
  * Scheduling class tree data structure manipulation methods:
@@ -410,6 +639,68 @@ struct sched_entity *__pick_last_entity(struct cfs_rq *cfs_rq)
 
 #endif
 
+/*
+ * delta /= w
+ */
+static inline u64 calc_delta_fair(u64 delta, struct sched_entity *se)
+{
+	if (unlikely(se->load.weight != NICE_0_LOAD))
+		delta = __calc_delta(delta, NICE_0_LOAD, &se->load);
+
+	return delta;
+}
+
+/*
+ * The idea is to set a period in which each task runs once.
+ *
+ * When there are too many tasks (sched_nr_latency) we have to stretch
+ * this period because otherwise the slices get too small.
+ *
+ * p = (nr <= nl) ? l : l*nr/nl
+ */
+static u64 __sched_period(unsigned long nr_running)
+{
+	if (unlikely(nr_running > sched_nr_latency))
+		return nr_running * sysctl_sched_min_granularity;
+	else
+		return sysctl_sched_latency;
+}
+
+/*
+ * We calculate the wall-time slice from the period by taking a part
+ * proportional to the weight.
+ *
+ * s = p*P[w/rw]
+ */
+static u64 sched_slice(struct cfs_rq *cfs_rq, struct sched_entity *se)
+{
+	u64 slice = __sched_period(cfs_rq->nr_running + !se->on_rq);
+
+	for_each_sched_entity(se) {
+		struct load_weight *load;
+		struct load_weight lw;
+
+		cfs_rq = cfs_rq_of(se);
+		load = &cfs_rq->load;
+
+		if (unlikely(!se->on_rq)) {
+			lw = cfs_rq->load;
+
+            // will clear the inv_weight
+            // should recalculate later
+			update_load_add(&lw, se->load.weight);
+			load = &lw;
+		}
+		slice = __calc_delta(slice, se->load.weight, load);
+	}
+	return slice;
+}
+
+static u64 sched_vslice(struct cfs_rq *cfs_rq, struct sched_entity *se)
+{
+	return calc_delta_fair(sched_slice(cfs_rq, se), se);
+}
+
 #ifdef CONFIG_SMP
 #else /* !CONFIG_SMP */
 void init_entity_runnable_average(struct sched_entity *se)
@@ -440,12 +731,146 @@ static inline void account_numa_dequeue(struct rq *rq, struct task_struct *p)
 
 #endif /* CONFIG_NUMA_BALANCING */
 
+#ifdef CONFIG_SMP
+#else
+static inline void
+enqueue_runnable_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *se) { }
+static inline void
+dequeue_runnable_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *se) { }
+static inline void
+enqueue_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *se) { }
+static inline void
+dequeue_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *se) { }
+#endif
+
+#ifdef CONFIG_FAIR_GROUP_SCHED
+#else /* CONFIG_FAIR_GROUP_SCHED */
+static inline void update_cfs_group(struct sched_entity *se)
+{
+}
+#endif /* CONFIG_FAIR_GROUP_SCHED */
+
+// #ifdef CONFIG_SMP
+// #else /* CONFIG_SMP */
+
+// static inline int
+// update_cfs_rq_load_avg(u64 now, struct cfs_rq *cfs_rq)
+// {
+// 	return 0;
+// }
+
+// #define UPDATE_TG	0x0
+// #define SKIP_AGE_LOAD	0x0
+// #define DO_ATTACH	0x0
+
+// static inline void update_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *se, int not_used1)
+// {
+// 	cfs_rq_util_change(cfs_rq, 0);
+// }
+
+// static inline void remove_entity_load_avg(struct sched_entity *se) {}
+
+// static inline void
+// attach_entity_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags) {}
+// static inline void
+// detach_entity_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *se) {}
+
+// static inline int idle_balance(struct rq *rq, struct rq_flags *rf)
+// {
+// 	return 0;
+// }
+
+// static inline void
+// util_est_enqueue(struct cfs_rq *cfs_rq, struct task_struct *p) {}
+
+// static inline void
+// util_est_dequeue(struct cfs_rq *cfs_rq, struct task_struct *p,
+// 		 bool task_sleep) {}
+
+// #endif /* CONFIG_SMP */
+
+// static void check_spread(struct cfs_rq *cfs_rq, struct sched_entity *se)
+// {
+// #ifdef CONFIG_SCHED_DEBUG
+// 	s64 d = se->vruntime - cfs_rq->min_vruntime;
+
+// 	if (d < 0)
+// 		d = -d;
+
+// 	if (d > 3*sysctl_sched_latency)
+// 		schedstat_inc(cfs_rq->nr_spread_over);
+// #endif
+// }
+
+// #ifdef CONFIG_CFS_BANDWIDTH
+// #else /* CONFIG_CFS_BANDWIDTH */
+// static inline u64 cfs_rq_clock_task(struct cfs_rq *cfs_rq)
+// {
+// 	return rq_clock_task(rq_of(cfs_rq));
+// }
+
+// static void account_cfs_rq_runtime(struct cfs_rq *cfs_rq, u64 delta_exec) {}
+// static bool check_cfs_rq_runtime(struct cfs_rq *cfs_rq) { return false; }
+// static void check_enqueue_throttle(struct cfs_rq *cfs_rq) {}
+// static inline void sync_throttle(struct task_group *tg, int cpu) {}
+// static __always_inline void return_cfs_rq_runtime(struct cfs_rq *cfs_rq) {}
+
+// static inline int cfs_rq_throttled(struct cfs_rq *cfs_rq)
+// {
+// 	return 0;
+// }
+
+// static inline int throttled_hierarchy(struct cfs_rq *cfs_rq)
+// {
+// 	return 0;
+// }
+
+// static inline int throttled_lb_pair(struct task_group *tg,
+// 				    int src_cpu, int dest_cpu)
+// {
+// 	return 0;
+// }
+
+// void init_cfs_bandwidth(struct cfs_bandwidth *cfs_b) {}
+
+// #ifdef CONFIG_FAIR_GROUP_SCHED
+// static void init_cfs_rq_runtime(struct cfs_rq *cfs_rq) {}
+// #endif
+
+// static inline struct cfs_bandwidth *tg_cfs_bandwidth(struct task_group *tg)
+// {
+// 	return NULL;
+// }
+// static inline void destroy_cfs_bandwidth(struct cfs_bandwidth *cfs_b) {}
+// static inline void update_runtime_enabled(struct rq *rq) {}
+// static inline void unthrottle_offline_cfs_rqs(struct rq *rq) {}
+
+// #endif /* CONFIG_CFS_BANDWIDTH */
+
+// #ifdef CONFIG_SCHED_HRTICK
+// #else /* !CONFIG_SCHED_HRTICK */
+// static inline void
+// hrtick_start_fair(struct rq *rq, struct task_struct *p)
+// {
+// }
+
+// static inline void hrtick_update(struct rq *rq)
+// {
+// }
+// #endif
+
+
+
 static void test(void){
+    __calc_delta(0,0,NULL);
     update_min_vruntime((struct csched_pcpu*)NULL);
     __enqueue_entity(NULL, NULL);
     __dequeue_entity(NULL, NULL);
     __pick_next_entity(NULL);
     update_tg_load_avg(NULL, 0);
+    task_tick_numa(NULL, NULL);
+    __sched_period(0);
+    sched_vslice(NULL, NULL);
 }
 
 static void csched_tick(void *_cpu);
