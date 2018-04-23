@@ -371,6 +371,12 @@ static inline void update_load_add(struct load_weight *lw, unsigned long inc)
 	lw->inv_weight = 0;
 }
 
+static inline void update_load_sub(struct load_weight *lw, unsigned long dec)
+{
+	lw->weight -= dec;
+	lw->inv_weight = 0;
+}
+
 #define WMULT_CONST	(~0U)
 #define WMULT_SHIFT	32
 
@@ -801,6 +807,42 @@ static inline void account_numa_dequeue(struct rq *rq, struct task_struct *p)
 
 #endif /* CONFIG_NUMA_BALANCING */
 
+static void
+account_entity_enqueue(struct cfs_rq *cfs_rq, struct sched_entity *se)
+{
+    // while enqueue, add the load of vcpu into pcpu
+	update_load_add(&cfs_rq->load, se->load.weight);
+	// treat rq same as pcpu
+    // no need to reupdate
+    //if (!parent_entity(se))
+	//	update_load_add(&rq_of(cfs_rq)->load, se->load.weight);
+#ifdef CONFIG_SMP
+	if (entity_is_task(se)) {
+		struct rq *rq = rq_of(cfs_rq);
+
+		account_numa_enqueue(rq, task_of(se));
+		list_add(&se->group_node, &rq->cfs_tasks);
+	}
+#endif
+    // update nr_running
+	cfs_rq->nr_running++;
+}
+
+static void
+account_entity_dequeue(struct cfs_rq *cfs_rq, struct sched_entity *se)
+{
+	update_load_sub(&cfs_rq->load, se->load.weight);
+	//if (!parent_entity(se))
+	//	update_load_sub(&rq_of(cfs_rq)->load, se->load.weight);
+#ifdef CONFIG_SMP
+	if (entity_is_task(se)) {
+		account_numa_dequeue(rq_of(cfs_rq), task_of(se));
+		list_del_init(&se->group_node);
+	}
+#endif
+	cfs_rq->nr_running--;
+}
+
 #ifdef CONFIG_SMP
 #else
 static inline void
@@ -812,6 +854,38 @@ enqueue_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *se) { }
 static inline void
 dequeue_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *se) { }
 #endif
+
+static void reweight_entity(struct cfs_rq *cfs_rq, struct sched_entity *se,
+			    unsigned long weight, unsigned long runnable)
+{
+	if (se->on_rq) {
+		/* commit outstanding execution time */
+		if (cfs_rq->curr == se)
+			update_curr(cfs_rq);
+		account_entity_dequeue(cfs_rq, se);
+		dequeue_runnable_load_avg(cfs_rq, se);
+	}
+	dequeue_load_avg(cfs_rq, se);
+
+	se->runnable_weight = runnable;
+	update_load_set(&se->load, weight);
+
+#ifdef CONFIG_SMP
+	do {
+		u32 divider = LOAD_AVG_MAX - 1024 + se->avg.period_contrib;
+
+		se->avg.load_avg = div_u64(se_weight(se) * se->avg.load_sum, divider);
+		se->avg.runnable_load_avg =
+			div_u64(se_runnable(se) * se->avg.runnable_load_sum, divider);
+	} while (0);
+#endif
+
+	enqueue_load_avg(cfs_rq, se);
+	if (se->on_rq) {
+		account_entity_enqueue(cfs_rq, se);
+		enqueue_runnable_load_avg(cfs_rq, se);
+	}
+}
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
 #else /* CONFIG_FAIR_GROUP_SCHED */
@@ -945,7 +1019,9 @@ static void test(void){
     sched_vslice(NULL, NULL);
     update_curr(NULL);
     update_curr_fair(NULL);
-    
+    account_entity_enqueue(NULL, NULL);
+    account_entity_dequeue(NULL, NULL);
+    reweight_entity(NULL,NULL,0,0);
     check_cfs_rq_runtime(NULL);
     check_enqueue_throttle(NULL);
 }
