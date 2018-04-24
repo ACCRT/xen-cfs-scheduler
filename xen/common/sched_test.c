@@ -2840,6 +2840,7 @@ csched_alloc_vdata(const struct scheduler *ops, struct vcpu *vc, void *dd)
     SCHED_STAT_CRANK(vcpu_alloc);
 
     svc->on_rq = 0;
+    svc->load = svc->sdom->load;
 
     return svc;
 }
@@ -3002,7 +3003,7 @@ csched_vcpu_yield(const struct scheduler *ops, struct vcpu *vc)
     /* Let the scheduler know that this vcpu is trying to yield */
     set_bit(CSCHED_FLAG_VCPU_YIELD, &svc->flags);
     
-    yield_task_fair(svc);
+    yield_task_fair(task_cfs_rq(svc));
 }
 
 static int
@@ -4101,7 +4102,8 @@ static const struct scheduler sched_credit_def = {
 
     .sleep          = csched_vcpu_sleep,    // ok
     .wake           = csched_vcpu_wake,     // is it ok to ignore migrate? __runq_tickle not finished
-    .yield          = csched_vcpu_yield,    // should deal with preemption in pick_next
+    .yield          = csched_vcpu_yield,    // will yield always the current running cpu? 
+                                            // should deal with preemption in pick_next
 
     .adjust         = csched_dom_cntl,      // what are these
     .adjust_affinity= csched_aff_cntl,
