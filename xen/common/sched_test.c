@@ -233,6 +233,8 @@ struct csched_dom {
     uint16_t active_vcpu_count;
     uint16_t weight;
     uint16_t cap;
+
+    struct load_weight load;
 };
 
 /*
@@ -544,9 +546,6 @@ static u64 __calc_delta(u64 delta_exec, unsigned long weight, struct load_weight
 	return mul_u64_u32_shr(delta_exec, fact, shift);
 }
 
-#ifdef CONFIG_FAIR_GROUP_SCHED
-#else	/* !CONFIG_FAIR_GROUP_SCHED */
-
 static inline struct task_struct *task_of(struct sched_entity *se)
 {
 	return se;
@@ -600,8 +599,6 @@ static inline void
 find_matching_se(struct sched_entity **se, struct sched_entity **pse)
 {
 }
-
-#endif	/* CONFIG_FAIR_GROUP_SCHED */
 
 static inline
 void account_cfs_rq_runtime(struct cfs_rq *cfs_rq, u64 delta_exec);
@@ -903,9 +900,6 @@ update_stats_curr_start(struct cfs_rq *cfs_rq, struct sched_entity *se)
 
 #ifdef CONFIG_NUMA_BALANCING
 #else
-static void task_tick_numa(struct rq *rq, struct task_struct *curr)
-{
-}
 
 static inline void account_numa_enqueue(struct rq *rq, struct task_struct *p)
 {
@@ -1008,12 +1002,9 @@ void reweight_task(struct task_struct *p, int prio)
 	load->inv_weight = sched_prio_to_wmult[prio];
 }
 
-#ifdef CONFIG_FAIR_GROUP_SCHED
-#else /* CONFIG_FAIR_GROUP_SCHED */
 static inline void update_cfs_group(struct sched_entity *se)
 {
 }
-#endif /* CONFIG_FAIR_GROUP_SCHED */
 
 #ifdef CONFIG_SMP
 #else /* CONFIG_SMP */
@@ -1531,10 +1522,6 @@ static inline int throttled_hierarchy(struct cfs_rq *cfs_rq)
 
 // void init_cfs_bandwidth(struct cfs_bandwidth *cfs_b) {}
 
-#ifdef CONFIG_FAIR_GROUP_SCHED
-static void init_cfs_rq_runtime(struct cfs_rq *cfs_rq) {}
-#endif
-
 // static inline struct cfs_bandwidth *tg_cfs_bandwidth(struct task_group *tg)
 // {
 // 	return NULL;
@@ -1607,11 +1594,11 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	// 	update_cfs_group(se);
 	// }
 
-	if (!se)
-		add_nr_running(rq, 1);
+	// if (!se)
+	// 	add_nr_running(rq, 1);
 
-	util_est_enqueue(rq, p);
-	hrtick_update(rq);
+	// util_est_enqueue(rq, p);
+	// hrtick_update(rq);
 }
 
 static void set_next_buddy(struct sched_entity *se);
@@ -1667,11 +1654,11 @@ static void dequeue_task_fair(struct rq *_rq, struct task_struct *p, int flags)
 	// 	update_cfs_group(se);
 	// }
 
-	if (!se)
-		sub_nr_running(_rq, 1);
+	// if (!se)
+	// 	sub_nr_running(_rq, 1);
 
-	util_est_dequeue(_rq, p, task_sleep);
-	hrtick_update(_rq);
+	// util_est_dequeue(_rq, p, task_sleep);
+	// hrtick_update(_rq);
 }
 
 static unsigned long wakeup_gran(struct sched_entity *se)
@@ -1782,85 +1769,6 @@ pick_next_task_fair(struct rq *_rq, struct task_struct *prev)
 //again:
 	if (!cfs_rq->nr_running)
 		goto idle;
-
-#ifdef CONFIG_FAIR_GROUP_SCHED
-	if (prev->sched_class != &fair_sched_class)
-		goto simple;
-
-	/*
-	 * Because of the set_next_buddy() in dequeue_task_fair() it is rather
-	 * likely that a next task is from the same cgroup as the current.
-	 *
-	 * Therefore attempt to avoid putting and setting the entire cgroup
-	 * hierarchy, only change the part that actually changes.
-	 */
-
-	do {
-		struct sched_entity *curr = cfs_rq->curr;
-
-		/*
-		 * Since we got here without doing put_prev_entity() we also
-		 * have to consider cfs_rq->curr. If it is still a runnable
-		 * entity, update_curr() will update its vruntime, otherwise
-		 * forget we've ever seen it.
-		 */
-		if (curr) {
-			if (curr->on_rq)
-				update_curr(cfs_rq);
-			else
-				curr = NULL;
-
-			/*
-			 * This call to check_cfs_rq_runtime() will do the
-			 * throttle and dequeue its entity in the parent(s).
-			 * Therefore the nr_running test will indeed
-			 * be correct.
-			 */
-			if (unlikely(check_cfs_rq_runtime(cfs_rq))) {
-				cfs_rq = &rq->cfs;
-
-				if (!cfs_rq->nr_running)
-					goto idle;
-
-				goto simple;
-			}
-		}
-
-		se = pick_next_entity(cfs_rq, curr);
-		cfs_rq = group_cfs_rq(se);
-	} while (cfs_rq);
-
-	p = task_of(se);
-
-	/*
-	 * Since we haven't yet done put_prev_entity and if the selected task
-	 * is a different task than we started out with, try and touch the
-	 * least amount of cfs_rqs.
-	 */
-	if (prev != p) {
-		struct sched_entity *pse = &prev->se;
-
-		while (!(cfs_rq = is_same_group(se, pse))) {
-			int se_depth = se->depth;
-			int pse_depth = pse->depth;
-
-			if (se_depth <= pse_depth) {
-				put_prev_entity(cfs_rq_of(pse), pse);
-				pse = parent_entity(pse);
-			}
-			if (se_depth >= pse_depth) {
-				set_next_entity(cfs_rq_of(se), se);
-				se = parent_entity(se);
-			}
-		}
-
-		put_prev_entity(cfs_rq, pse);
-		set_next_entity(cfs_rq, se);
-	}
-
-	goto done;
-simple:
-#endif
 
 	put_prev_task_fair(_rq, prev);
 
@@ -2022,10 +1930,8 @@ static inline bool vruntime_normalized(struct task_struct *p)
 
 	return false;
 }
-#ifdef CONFIG_FAIR_GROUP_SCHED
-#else
+
 static void propagate_entity_cfs_rq(struct sched_entity *se) { }
-#endif
 
 static void detach_entity_cfs_rq(struct sched_entity *se)
 {
@@ -2041,14 +1947,6 @@ static void detach_entity_cfs_rq(struct sched_entity *se)
 static void attach_entity_cfs_rq(struct sched_entity *se)
 {
 	struct cfs_rq *cfs_rq = cfs_rq_of(se);
-
-#ifdef CONFIG_FAIR_GROUP_SCHED
-	/*
-	 * Since the real-depth could have been changed (only FAIR
-	 * class maintain depth value), reset depth properly.
-	 */
-	se->depth = se->parent ? se->parent->depth + 1 : 0;
-#endif
 
 	/* Synchronize entity with its cfs_rq */
 	update_load_avg(cfs_rq, se, SKIP_AGE_LOAD);
@@ -2120,16 +2018,7 @@ void init_cfs_rq(struct cfs_rq *cfs_rq)
 
 
 static void test(void){
-    __pick_next_entity(NULL);
-    task_tick_numa(NULL, NULL);
     update_curr_fair(NULL);
-    check_cfs_rq_runtime(NULL);
-    enqueue_entity(NULL, NULL, 0);
-    dequeue_entity(NULL, NULL, 0);
-    set_next_entity(NULL, NULL);
-    pick_next_entity(NULL, NULL);
-    put_prev_entity(NULL, NULL);
-    enqueue_task_fair(NULL, NULL, 0);
     dequeue_task_fair(NULL, NULL, 0);
     wakeup_preempt_entity(NULL, NULL);
     set_last_buddy(NULL);
@@ -2138,7 +2027,6 @@ static void test(void){
     task_tick_fair(NULL, NULL, 0);
     detach_task_cfs_rq(NULL);
     attach_task_cfs_rq(NULL);
-    //switched_from_fair(NULL,NULL);
     set_curr_task_fair(NULL);
 }
 
@@ -2148,7 +2036,8 @@ static void csched_acct(void *dummy);
 static inline int
 __vcpu_on_runq(struct csched_vcpu *svc)
 {
-    return !list_empty(&svc->runq_elem);
+    //return !list_empty(&svc->runq_elem);
+    return svc->on_rq;
 }
 
 static inline struct csched_vcpu *
@@ -2523,8 +2412,8 @@ init_pdata(struct csched_private *prv, struct csched_pcpu *spc, int cpu)
     init_timer(&spc->ticker, csched_tick, (void *)(unsigned long)cpu, cpu);
     set_timer(&spc->ticker, NOW() + MICROSECS(prv->tick_period_us) );
 
-    INIT_LIST_HEAD(&spc->runq);
-    spc->runq_sort_last = prv->runq_sort;
+    //INIT_LIST_HEAD(&spc->runq);
+    //spc->runq_sort_last = prv->runq_sort;
     spc->idle_bias = nr_cpu_ids - 1;
 
     /* Start off idling... */
@@ -2533,6 +2422,9 @@ init_pdata(struct csched_private *prv, struct csched_pcpu *spc, int cpu)
     spc->nr_runnable = 0;
 
     spc->cpu = cpu;
+    spc->nr_running = 0;
+
+    init_cfs_rq(spc);
 }
 
 static void
@@ -2938,14 +2830,17 @@ csched_alloc_vdata(const struct scheduler *ops, struct vcpu *vc, void *dd)
     if ( svc == NULL )
         return NULL;
 
-    INIT_LIST_HEAD(&svc->runq_elem);
-    INIT_LIST_HEAD(&svc->active_vcpu_elem);
+    //INIT_LIST_HEAD(&svc->runq_elem);
+    //INIT_LIST_HEAD(&svc->active_vcpu_elem);
     svc->sdom = dd;
     svc->vcpu = vc;
     svc->pri = is_idle_domain(vc->domain) ?
         CSCHED_PRI_IDLE : CSCHED_PRI_TS_UNDER;
     SCHED_VCPU_STATS_RESET(svc);
     SCHED_STAT_CRANK(vcpu_alloc);
+
+    svc->on_rq = 0;
+
     return svc;
 }
 
@@ -2967,7 +2862,8 @@ csched_vcpu_insert(const struct scheduler *ops, struct vcpu *vc)
     lock = vcpu_schedule_lock_irq(vc);
 
     if ( !__vcpu_on_runq(svc) && vcpu_runnable(vc) && !vc->is_running )
-        runq_insert(svc);
+        //runq_insert(svc);
+        enqueue_task_fair(NULL, svc, 0);
 
     vcpu_schedule_unlock_irq(lock, vc);
 
@@ -2979,7 +2875,7 @@ csched_free_vdata(const struct scheduler *ops, void *priv)
 {
     struct csched_vcpu *svc = priv;
 
-    BUG_ON( !list_empty(&svc->runq_elem) );
+    //BUG_ON( !list_empty(&svc->runq_elem) );
 
     xfree(svc);
 }
@@ -3032,7 +2928,8 @@ csched_vcpu_sleep(const struct scheduler *ops, struct vcpu *vc)
         cpu_raise_softirq(cpu, SCHEDULE_SOFTIRQ);
     }
     else if ( __vcpu_on_runq(svc) )
-        runq_remove(svc);
+        //runq_remove(svc);
+        dequeue_task_fair(NULL, svc, DEQUEUE_SLEEP);
 }
 
 static void
@@ -3092,7 +2989,8 @@ csched_vcpu_wake(const struct scheduler *ops, struct vcpu *vc)
     }
 
     /* Put the VCPU on the runq and tickle CPUs */
-    runq_insert(svc);
+    //runq_insert(svc);
+    enqueue_task_fair(NULL, svc, ENQUEUE_WAKEUP);
     __runq_tickle(svc);
 }
 
@@ -3103,6 +3001,8 @@ csched_vcpu_yield(const struct scheduler *ops, struct vcpu *vc)
 
     /* Let the scheduler know that this vcpu is trying to yield */
     set_bit(CSCHED_FLAG_VCPU_YIELD, &svc->flags);
+    
+    yield_task_fair(svc);
 }
 
 static int
@@ -3235,6 +3135,10 @@ csched_alloc_domdata(const struct scheduler *ops, struct domain *dom)
     INIT_LIST_HEAD(&sdom->active_sdom_elem);
     sdom->dom = dom;
     sdom->weight = CSCHED_DEFAULT_WEIGHT;
+
+    // set default weight to 1024
+    (sdom->load).weight = scale_load(sched_prio_to_weight[20]);
+	(sdom->load).inv_weight = sched_prio_to_wmult[20];
 
     return sdom;
 }
@@ -4192,36 +4096,36 @@ static const struct scheduler sched_credit_def = {
     .sched_id       = XEN_SCHEDULER_CREDIT,
     .sched_data     = NULL,
 
-    .insert_vcpu    = csched_vcpu_insert,
-    .remove_vcpu    = csched_vcpu_remove,
+    .insert_vcpu    = csched_vcpu_insert,   // ok
+    .remove_vcpu    = csched_vcpu_remove,   // why no remove??
 
-    .sleep          = csched_vcpu_sleep,
-    .wake           = csched_vcpu_wake,
-    .yield          = csched_vcpu_yield,
+    .sleep          = csched_vcpu_sleep,    // ok
+    .wake           = csched_vcpu_wake,     // is it ok to ignore migrate? __runq_tickle not finished
+    .yield          = csched_vcpu_yield,    // should deal with preemption in pick_next
 
-    .adjust         = csched_dom_cntl,
+    .adjust         = csched_dom_cntl,      // what are these
     .adjust_affinity= csched_aff_cntl,
     .adjust_global  = csched_sys_cntl,
 
-    .pick_cpu       = csched_cpu_pick,
-    .do_schedule    = csched_schedule,
+    .pick_cpu       = csched_cpu_pick,      // will that be ok?
+    .do_schedule    = csched_schedule,      // wait to do
 
-    .dump_cpu_state = csched_dump_pcpu,
-    .dump_settings  = csched_dump,
-    .init           = csched_init,
-    .deinit         = csched_deinit,
-    .alloc_vdata    = csched_alloc_vdata,
-    .free_vdata     = csched_free_vdata,
-    .alloc_pdata    = csched_alloc_pdata,
-    .init_pdata     = csched_init_pdata,
-    .deinit_pdata   = csched_deinit_pdata,
-    .free_pdata     = csched_free_pdata,
-    .switch_sched   = csched_switch_sched,
-    .alloc_domdata  = csched_alloc_domdata,
-    .free_domdata   = csched_free_domdata,
+    .dump_cpu_state = csched_dump_pcpu,     // do not need
+    .dump_settings  = csched_dump,          // do net need
+    .init           = csched_init,          // do not care
+    .deinit         = csched_deinit,        // do not care
+    .alloc_vdata    = csched_alloc_vdata,   // ok, no weight set 
+    .free_vdata     = csched_free_vdata,    // ok
+    .alloc_pdata    = csched_alloc_pdata,   // ok
+    .init_pdata     = csched_init_pdata,    // csched_acct to do
+    .deinit_pdata   = csched_deinit_pdata,  // ok
+    .free_pdata     = csched_free_pdata,    // ok
+    .switch_sched   = csched_switch_sched,  // do not care, not used in this test
+    .alloc_domdata  = csched_alloc_domdata, // ok
+    .free_domdata   = csched_free_domdata,  // ok
 
-    .tick_suspend   = csched_tick_suspend,
-    .tick_resume    = csched_tick_resume,
+    .tick_suspend   = csched_tick_suspend,  // ok
+    .tick_resume    = csched_tick_resume,   // ok
 };
 
 REGISTER_SCHEDULER(sched_credit_def);
