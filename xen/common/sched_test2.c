@@ -1319,7 +1319,7 @@ set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 		 */
 		//update_stats_wait_end(cfs_rq, se);
 		__dequeue_entity(cfs_rq, se);
-		update_load_avg(cfs_rq, se, UPDATE_TG);
+		//update_load_avg(cfs_rq, se, UPDATE_TG);
 	}
 
 	update_stats_curr_start(cfs_rq, se);
@@ -1437,8 +1437,8 @@ entity_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr, int queued)
 	/*
 	 * Ensure that runnable average is periodically updated.
 	 */
-	update_load_avg(cfs_rq, curr, UPDATE_TG);
-	update_cfs_group(curr);
+	//update_load_avg(cfs_rq, curr, UPDATE_TG);
+	//update_cfs_group(curr);
 
 #ifdef CONFIG_SCHED_HRTICK
 	/*
@@ -1457,8 +1457,8 @@ entity_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr, int queued)
 		return;
 #endif
 
-    if (cfs_rq->nr_running > 1)
-		check_preempt_tick(cfs_rq, curr);
+    // if (cfs_rq->nr_running > 1)
+	// 	check_preempt_tick(cfs_rq, curr);
 }
 
 #ifdef CONFIG_CFS_BANDWIDTH
@@ -1936,10 +1936,10 @@ static void task_tick_fair(struct rq *_rq, struct task_struct *curr, int queued)
 	struct cfs_rq *cfs_rq;
 	struct sched_entity *se = curr;
 
-	for_each_sched_entity(se) {
+	//for_each_sched_entity(se) {
 		cfs_rq = cfs_rq_of(se);
 		entity_tick(cfs_rq, se, queued);
-	}
+	//}
 
 	// if (static_branch_unlikely(&sched_numa_balancing))
 	// 	task_tick_numa(rq, curr);
@@ -2971,7 +2971,7 @@ csched_vcpu_sleep(const struct scheduler *ops, struct vcpu *vc)
     else if ( __vcpu_on_runq(svc) )
     {
         runq_remove(svc);
-        //dequeue_task_fair(NULL, svc, DEQUEUE_SLEEP);
+        dequeue_task_fair(NULL, svc, DEQUEUE_SLEEP);
     }
 }
 
@@ -3034,6 +3034,7 @@ csched_vcpu_wake(const struct scheduler *ops, struct vcpu *vc)
     /* Put the VCPU on the runq and tickle CPUs */
     runq_insert(svc);
     enqueue_task_fair(NULL, svc, ENQUEUE_WAKEUP | (migrating? ENQUEUE_MIGRATED:0));
+    entity_tick(CSCHED_PCPU(svc->vcpu->processor), svc, 0);
     __runq_tickle(svc);
 }
 
@@ -3470,8 +3471,10 @@ csched_tick(void *_cpu)
     /*
      * Accounting for running VCPU
      */
-    if ( !is_idle_vcpu(current) )
+    if ( !is_idle_vcpu(current) ){
         csched_vcpu_acct(prv, cpu);
+        entity_tick(CSCHED_PCPU(cpu), CSCHED_PCPU(cpu)->curr, 1);
+    }
 
     /*
      * Check if runq needs to be sorted
@@ -3546,7 +3549,7 @@ csched_runq_steal(int peer_cpu, int cpu, int pri, int balance_step)
             SCHED_STAT_CRANK(migrate_queued);
             WARN_ON(vc->is_urgent);
             runq_remove(speer);
-            //dequeue_task_fair(NULL, speer, 0);
+            dequeue_task_fair(NULL, speer, 0);
             vc->processor = cpu;
             /*
              * speer will start executing directly on cpu, without having to
@@ -3703,9 +3706,13 @@ csched_load_balance(struct csched_private *prv, int cpu,
  out:
     /* Failed to find more important work elsewhere... */
     __runq_remove(snext);
-    if(CSCHED_PCPU(snext->vcpu->processor)->curr != snext)
-        __dequeue_entity(CSCHED_PCPU(snext->vcpu->processor), snext);
-        //set_next_entity(CSCHED_PCPU(snext->vcpu->processor), snext);
+    // if(CSCHED_PCPU(snext->vcpu->processor)->curr != snext)
+    //     __dequeue_entity(CSCHED_PCPU(snext->vcpu->processor), snext);
+    // if(CSCHED_PCPU(snext->vcpu->processor)->curr == snext)
+    // {
+    //     //dequeue_entity(CSCHED_PCPU(scurr->vcpu->processor), scurr, 0);
+    //     set_next_entity(CSCHED_PCPU(snext->vcpu->processor), snext);
+    // }
     return snext;
 }
 
@@ -3749,11 +3756,6 @@ csched_schedule(
     if ( runtime < 0 ) /* Does this ever happen? */
         runtime = 0;
 
-    if(CSCHED_PCPU(scurr->vcpu->processor)->curr == scurr)
-    {
-        dequeue_entity(CSCHED_PCPU(scurr->vcpu->processor), scurr, 0);
-    }
-
     if ( !is_idle_vcpu(scurr->vcpu) )
     {
         /* Update credits of a non-idle VCPU. */
@@ -3795,6 +3797,7 @@ csched_schedule(
     {
         snext = scurr;
         snext->start_time += now;
+        //yield_task_fair();
         perfc_incr(delay_ms);
         /*
          * Next timeslice must last just until we'll have executed for
@@ -3842,8 +3845,19 @@ csched_schedule(
 
     //snext = pick_next_task_fair(CSCHED_PCPU(cpu), scurr);
     snext = pick_next_entity(CSCHED_PCPU(cpu), NULL);
+    // if(CSCHED_PCPU(snext->vcpu->processor)->curr == snext)
+    // {
+    //     //dequeue_entity(CSCHED_PCPU(scurr->vcpu->processor), scurr, 0);
+    //     set_next_entity(CSCHED_PCPU(snext->vcpu->processor), snext);
+    // }
     snext = __runq_elem(runq->next);
     ret.migrated = 0;
+
+    // if(CSCHED_PCPU(scurr->vcpu->processor)->curr == scurr)
+    // {
+    //     //dequeue_entity(CSCHED_PCPU(scurr->vcpu->processor), scurr, 0);
+    //     set_next_entity(CSCHED_PCPU(scurr->vcpu->processor), scurr);
+    // }
 
     /* Tasklet work (which runs in idle VCPU context) overrides all else. */
     if ( tasklet_work_scheduled )
@@ -3869,11 +3883,22 @@ csched_schedule(
     if ( snext->pri > CSCHED_PRI_TS_OVER )
     {
         __runq_remove(snext);
-        if(CSCHED_PCPU(snext->vcpu->processor)->curr != snext)
-            __dequeue_entity(CSCHED_PCPU(snext->vcpu->processor), snext);
+        // if(CSCHED_PCPU(snext->vcpu->processor)->curr != snext)
+        //     __dequeue_entity(CSCHED_PCPU(snext->vcpu->processor), snext);
+        // if(CSCHED_PCPU(snext->vcpu->processor)->curr == snext)
+        // {
+        //     //dequeue_entity(CSCHED_PCPU(scurr->vcpu->processor), scurr, 0);
+        //     set_next_entity(CSCHED_PCPU(snext->vcpu->processor), snext);
+        // }
     }
     else
         snext = csched_load_balance(prv, cpu, snext, &ret.migrated);
+
+    //if(CSCHED_PCPU(snext->vcpu->processor)->curr == snext)
+    //{
+        //dequeue_entity(CSCHED_PCPU(scurr->vcpu->processor), scurr, 0);
+        set_next_entity(CSCHED_PCPU(snext->vcpu->processor), snext);
+    //}
 
     /*
      * Update idlers mask if necessary. When we're idling, other CPUs
@@ -4136,6 +4161,7 @@ static void test(void){
     task_tick_fair(NULL, NULL, 0);
     enqueue_task_fair(NULL, NULL, 0);
     pick_next_task_fair(NULL, NULL);
+    check_preempt_tick(NULL, NULL);
 }
 
 static void
